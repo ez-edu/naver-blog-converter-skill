@@ -7,13 +7,13 @@
 Codex 권장:
 
 ```bash
-npx --yes skills add <owner>/naver-blog-converter-skill --skill naver-blog-converter --agent codex -g -y
+npx --yes skills add ez-edu/naver-blog-converter-skill --skill naver-blog-converter --agent codex -g -y
 ```
 
 로컬 테스트:
 
 ```bash
-npx --yes skills add /Users/wbjung/naver-blog-converter-skill --list
+npx --yes skills add . --list
 ```
 
 ## 현재 지원 범위

@@ -7,16 +7,10 @@
 PowerShell 또는 Terminal에서 실행한다.
 
 ```bash
-npx --yes skills add <owner>/naver-blog-converter-skill --skill naver-blog-converter --agent codex -g -y
+npx --yes skills add ez-edu/naver-blog-converter-skill --skill naver-blog-converter --agent codex -g -y
 ```
 
-GitHub에 올린 뒤 `<owner>`를 실제 GitHub 계정/조직명으로 바꾼다.
-
-로컬 테스트용:
-
-```bash
-npx --yes skills add /Users/wbjung/naver-blog-converter-skill --skill naver-blog-converter --agent codex -g -y
-```
+개발자 로컬 테스트용은 저장소를 clone한 뒤 로컬 경로로 설치할 수 있다. 일반 직원은 위 GitHub 설치 명령만 사용한다.
 
 설치 확인:
 
