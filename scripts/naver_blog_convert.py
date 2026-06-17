@@ -124,7 +124,11 @@ class ContentParser(HTMLParser):
         elif tag == "a":
             text = clean_text("".join(self.current).split("\uFFF9")[-1])
             if self.current_href:
-                self.links.append({"href": html.unescape(self.current_href), "text": text})
+                href = html.unescape(self.current_href)
+                self.links.append({"href": href, "text": text})
+                # Preserve the target URL inline so Markdown/HTML drafts do not lose references.
+                if href and href not in "".join(self.current[-3:]):
+                    self.current.append(f" ({href})")
             self.in_a = False
             self.current_href = ""
         if self.stack and self.stack[-1] == tag:
@@ -198,7 +202,13 @@ def parse_content(raw: str, title: str) -> Dict:
     blocks = []
     seen_img = set()
     last_key = None
+    body_started = False
     for b in parser.blocks:
+        # Drop title/nav duplicates commonly emitted from <title>/<h1> before the actual body.
+        if not body_started and b.get("type") in {"paragraph", "heading"}:
+            if clean_text(b.get("text", "")) == clean_text(title):
+                continue
+        body_started = True
         if b.get("type") == "image":
             key = b.get("src", "")
             if not key or key in seen_img:
