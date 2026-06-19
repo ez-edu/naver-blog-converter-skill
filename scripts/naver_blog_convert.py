@@ -16,6 +16,7 @@ import sys
 import textwrap
 import urllib.parse
 import urllib.request
+from collections import Counter
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -298,6 +299,171 @@ def render_html(data: Dict, source_url: str, platform: str, add_source: bool = T
     return "\n".join(lines).strip() + "\n"
 
 
+KOREAN_STOPWORDS = {
+    "그리고", "그러나", "하지만", "때문", "위해", "대한", "관련", "입니다", "합니다", "있는", "없는",
+    "이번", "오늘", "우리", "여러분", "네이버", "블로그", "티스토리", "워드프레스", "포스팅", "게시물",
+    "the", "and", "for", "with", "from", "this", "that", "into", "naver", "blog",
+}
+
+
+def plain_text_from_blocks(data: Dict) -> str:
+    texts = [str(b.get("text", "")) for b in data.get("blocks", []) if b.get("type") != "image"]
+    return clean_text("\n".join(t for t in texts if t))
+
+
+def sentence_candidates(text: str) -> List[str]:
+    parts = re.split(r"(?<=[.!?。！？])\s+|\n+", text)
+    return [clean_text(p) for p in parts if len(clean_text(p)) >= 20]
+
+
+def normalize_keyword(token: str) -> str:
+    token = token.strip("-_.:,;!?()[]{}<>\"'‘’“”。，！？；：")
+    token = re.sub(r"(은|는|이|가|을|를|과|와|로|으로|의|에|에서|에게|부터|까지|도|만)$", "", token)
+    return token.strip("-_.:,;!?()[]{}<>\"'‘’“”。，！？；：")
+
+
+def extract_keywords(data: Dict, limit: int = 12) -> List[str]:
+    text = f"{data.get('title', '')}\n{plain_text_from_blocks(data)}"
+    tokens = re.findall(r"[가-힣A-Za-z0-9][가-힣A-Za-z0-9+#._-]{1,24}", text)
+    counts: Counter[str] = Counter()
+    display: Dict[str, str] = {}
+    for token in tokens:
+        display_token = normalize_keyword(token)
+        normalized = display_token.lower()
+        if len(normalized) < 2 or normalized in KOREAN_STOPWORDS:
+            continue
+        if normalized.isdigit():
+            continue
+        display.setdefault(normalized, display_token)
+        counts[normalized] += 2 if token in str(data.get("title", "")) else 1
+    return [display[word] for word, _ in counts.most_common(limit)]
+
+
+def object_particle(word: str) -> str:
+    if not word:
+        return "를"
+    last = word[-1]
+    code = ord(last)
+    if 0xAC00 <= code <= 0xD7A3:
+        return "을" if (code - 0xAC00) % 28 else "를"
+    return "를"
+
+
+def clip_text(text: str, max_chars: int) -> str:
+    text = clean_text(re.sub(r"\s+", " ", text))
+    if len(text) <= max_chars:
+        return text
+    clipped = text[: max_chars - 1].rstrip()
+    clipped = re.sub(r"[,，.。!！?？;；:]?\s*[^\s,，.。!！?？;；:]*$", "", clipped).rstrip()
+    return (clipped or text[: max_chars - 1]).rstrip() + "…"
+
+
+def build_geo_aeo_pack(data: Dict, source_url: str, mode: str) -> Dict:
+    text = plain_text_from_blocks(data)
+    sentences = sentence_candidates(text)
+    keywords = extract_keywords(data)
+    primary = keywords[0] if keywords else clean_text(str(data.get("title", "")))[:30]
+    title = clean_text(str(data.get("title", "")))
+    seo_title = clip_text(title if primary in title else f"{title} - {primary}", 58)
+    summary_seed = " ".join(sentences[:3]) or text or title
+    answer_summary = clip_text(summary_seed, 320)
+    meta_description = clip_text(summary_seed, 155)
+    faq = [
+        {
+            "question": f"{title}의 핵심은 무엇인가요?",
+            "answer": answer_summary,
+        },
+        {
+            "question": f"{primary}{object_particle(primary)} 확인할 때 가장 먼저 볼 점은 무엇인가요?",
+            "answer": clip_text(sentences[1] if len(sentences) > 1 else summary_seed, 220),
+        },
+        {
+            "question": "이 글은 누구에게 도움이 되나요?",
+            "answer": clip_text(f"{primary}에 관심이 있고 실제 적용 방법, 선택 기준, 주의사항을 빠르게 파악하려는 독자에게 도움이 됩니다.", 220),
+        },
+        {
+            "question": "게시 전 추가로 확인할 사항은 무엇인가요?",
+            "answer": "제목과 메타 설명에 핵심 키워드가 자연스럽게 포함됐는지, 본문 첫 문단이 질문에 바로 답하는지, 이미지 alt 텍스트와 출처 표기가 적절한지 확인하세요.",
+        },
+    ]
+    schema = {
+        "@context": "https://schema.org",
+        "@graph": [
+            {
+                "@type": "Article",
+                "headline": seo_title,
+                "description": meta_description,
+                "mainEntityOfPage": source_url or "",
+                "keywords": keywords,
+            },
+            {
+                "@type": "FAQPage",
+                "mainEntity": [
+                    {"@type": "Question", "name": item["question"], "acceptedAnswer": {"@type": "Answer", "text": item["answer"]}}
+                    for item in faq
+                ],
+            },
+        ],
+    }
+    return {
+        "mode": mode,
+        "primary_keyword": primary,
+        "secondary_keywords": keywords[1:8],
+        "seo_title": seo_title,
+        "meta_description": meta_description,
+        "answer_summary": answer_summary,
+        "faq": faq,
+        "schema_json_ld": schema,
+        "checklist": [
+            "첫 문단에서 핵심 질문에 2~3문장으로 바로 답하기",
+            "H2/H3를 검색 의도형 질문으로 정리하기",
+            "FAQ 3~5개를 본문 하단에 추가하기",
+            "이미지 alt 텍스트에 맥락 키워드를 자연스럽게 넣기",
+            "원문 출처와 내부 링크/관련 글 링크를 확인하기",
+            "WordPress라면 SEO title, meta description, FAQ schema 적용 여부 확인하기",
+        ],
+    }
+
+
+def append_geo_aeo_blocks(data: Dict, pack: Dict) -> Dict:
+    blocks = list(data.get("blocks", []))
+    blocks.extend([
+        {"type": "heading", "level": "h2", "text": "핵심 요약"},
+        {"type": "paragraph", "text": pack["answer_summary"]},
+        {"type": "heading", "level": "h2", "text": "자주 묻는 질문"},
+    ])
+    for item in pack["faq"]:
+        blocks.append({"type": "heading", "level": "h3", "text": item["question"]})
+        blocks.append({"type": "paragraph", "text": item["answer"]})
+    copied = dict(data)
+    copied["blocks"] = blocks
+    return copied
+
+
+def render_optimization_markdown(pack: Dict) -> str:
+    lines = [
+        "# GEO/AEO 최적화 제안",
+        "",
+        f"- 최적화 모드: {pack['mode']}",
+        f"- 대표 키워드: {pack['primary_keyword']}",
+        f"- 보조 키워드: {', '.join(pack['secondary_keywords']) or '(없음)'}",
+        f"- SEO 제목안: {pack['seo_title']}",
+        f"- 메타 설명안: {pack['meta_description']}",
+        "",
+        "## AI/검색 답변용 핵심 요약",
+        "",
+        pack["answer_summary"],
+        "",
+        "## FAQ 초안",
+        "",
+    ]
+    for item in pack["faq"]:
+        lines += [f"### {item['question']}", "", item["answer"], ""]
+    lines += ["## 구조화 데이터 초안(JSON-LD)", "", "```json", json.dumps(pack["schema_json_ld"], ensure_ascii=False, indent=2), "```", "", "## 게시 전 체크리스트", ""]
+    lines += [f"- {item}" for item in pack["checklist"]]
+    return "\n".join(lines).strip() + "\n"
+
+
 def download_images(images: List[Dict], out_dir: Path, max_images: int) -> List[Dict]:
     image_dir = out_dir / "images"
     image_dir.mkdir(parents=True, exist_ok=True)
@@ -332,6 +498,12 @@ def main(argv: List[str] | None = None) -> int:
     ap.add_argument("--slug", default="", help="Filename slug")
     ap.add_argument("--download-images", action="store_true")
     ap.add_argument("--max-images", type=int, default=20)
+    ap.add_argument(
+        "--optimize-for",
+        choices=["none", "geo", "aeo", "both"],
+        default="both",
+        help="Add GEO/AEO-ready summary, FAQ, metadata suggestions, and JSON-LD guidance. Default: both",
+    )
     ap.add_argument("--no-source-note", action="store_true")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
@@ -355,19 +527,29 @@ def main(argv: List[str] | None = None) -> int:
     slug = args.slug or slugify(title)
     generated = {}
     add_source = not args.no_source_note
+    optimization = build_geo_aeo_pack(data, source_url, args.optimize_for) if args.optimize_for != "none" else {}
+    render_data = append_geo_aeo_blocks(data, optimization) if optimization else data
 
     if args.target in {"both", "markdown"}:
         path = out_dir / f"{slug}.md"
-        path.write_text(render_markdown(data, source_url, add_source), encoding="utf-8")
+        path.write_text(render_markdown(render_data, source_url, add_source), encoding="utf-8")
         generated["markdown"] = str(path)
     if args.target in {"both", "tistory"}:
         path = out_dir / f"{slug}.tistory.html"
-        path.write_text(render_html(data, source_url, "tistory", add_source), encoding="utf-8")
+        path.write_text(render_html(render_data, source_url, "tistory", add_source), encoding="utf-8")
         generated["tistory_html"] = str(path)
     if args.target in {"both", "wordpress"}:
         path = out_dir / f"{slug}.wordpress.html"
-        path.write_text(render_html(data, source_url, "wordpress", add_source), encoding="utf-8")
+        path.write_text(render_html(render_data, source_url, "wordpress", add_source), encoding="utf-8")
         generated["wordpress_html"] = str(path)
+
+    if optimization:
+        opt_md = out_dir / f"{slug}.geo-aeo.md"
+        opt_md.write_text(render_optimization_markdown(optimization), encoding="utf-8")
+        generated["geo_aeo_guide"] = str(opt_md)
+        opt_json = out_dir / f"{slug}.geo-aeo.json"
+        opt_json.write_text(json.dumps(optimization, ensure_ascii=False, indent=2), encoding="utf-8")
+        generated["geo_aeo_json"] = str(opt_json)
 
     image_list = out_dir / f"{slug}.images.json"
     image_list.write_text(json.dumps(data["images"], ensure_ascii=False, indent=2), encoding="utf-8")
@@ -388,6 +570,7 @@ def main(argv: List[str] | None = None) -> int:
         "block_count": len(data["blocks"]),
         "image_count": len(data["images"]),
         "generated": generated,
+        "optimization": optimization,
         "warning": warning,
     }
     if args.json:
@@ -402,6 +585,10 @@ def main(argv: List[str] | None = None) -> int:
         print("생성 파일:")
         for k, v in generated.items():
             print(f"- {k}: {v}")
+        if optimization:
+            print(f"GEO/AEO 대표 키워드: {optimization['primary_keyword']}")
+            print(f"SEO 제목안: {optimization['seo_title']}")
+            print(f"메타 설명안: {optimization['meta_description']}")
         if warning:
             print(f"경고: {warning}")
         print("검토 필요: 이미지 권리/재업로드, 내부 링크, 카테고리/태그, 게시 전 미리보기")
